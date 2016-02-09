@@ -1,0 +1,325 @@
+
+%prelude {
+ #include "tc.h"
+ #pragma warning(disable:4013)
+ #pragma warning(disable:4716)
+ #pragma warning(disable:4715)
+}
+
+%token STRING, NUMBER, REAL, ID, FUNCTION, CAST_STRING, CAST_NUMBER, CAST_REAL,
+       IF, RETURN, FOR, WHILE, BREAK, SWITCH, CASE, CONTINUE, WITH, UNTIL,
+       DEFAULT, ELSE, NEW, MEMBER, INFINITY, REGISTER ;
+
+program:
+ {
+  fp_add(sp_add("$",1)); 
+ }
+ ( statement | function_def )*
+ {
+  chunk_write(TPUSH1,0,1) ; chunk_write(TRETURN,0,0) ; 
+ }
+;
+
+function_def:
+ FUNCTION ID<name> { fp_add(name.index); } 
+ ( | ':' function_def_arg ( ',' function_def_arg )* | ':' )
+ content { chunk_write(TPUSH1,0,1) ; chunk_write(TRETURN,0,0) ; fp_revert() ; }
+;
+
+function_def_arg:
+ ID<arg> { fp_arg(arg.index); }
+;
+
+content:
+ '{' statements '}'
+ | statement 
+;
+
+statements:
+ statement (  statement  )*
+;
+
+statement:
+ exp0 ';' { chunk_write (TPOP, 0, 0) ; }
+ | if_statement
+ | while_statement
+ | infinity_statement
+ | continue_statement ';'
+ | break_statement ';'
+ | return_statement ';'
+ | ';'
+;
+
+continue_statement:
+ %prelude {
+  TCLOOP * loop ;
+ }
+ CONTINUE {
+  loop = lp_get(0) ;
+  if (!loop) 
+   yyerror("No loop to continue") ;
+  else
+   chunk_write(TGOTO,loop->begin_pos,sizeof(dword)) ;  
+ }
+ | CONTINUE NUMBER<n> {
+  loop = lp_get(n.number-1) ;
+  if (!loop) 
+   yyerror("No loop to continue") ;
+  else
+   chunk_write(TGOTO,loop->begin_pos,sizeof(dword)) ; 
+ }
+;
+
+break_statement:
+ %prelude {
+  TCLOOP * loop ;
+ }
+ BREAK {
+  loop = lp_get(0) ;
+  if (!loop) 
+   yyerror("No loop to break out of") ;
+  else
+   lp_add_trace(loop,chunk_write(TGOTO,0,4)) ;
+ }
+ | BREAK NUMBER<n> {
+  loop = lp_get(n.number-1) ;
+  if (!loop) 
+   yyerror("No loop to break out of") ;
+  else
+   lp_add_trace(loop,chunk_write(TGOTO,0,4)) ;
+ }
+;
+
+if_statement:
+ %prelude {
+  dword if_location, goto_location, else_location, end_location ;
+ }
+ 
+ IF '(' exp0 ')' 
+ {
+  if_location = chunk_write(TIF,0,4) ;
+ }
+ content
+ ( {
+  end_location = chunk_get() ;
+  chunk_writeat(if_location,end_location,4) ;
+ } | {
+  goto_location = chunk_write(TGOTO,0,4) ;
+  else_location = chunk_get() ;
+ } ELSE content {
+  end_location = chunk_get() ;
+  chunk_writeat(if_location,else_location,4) ;
+  chunk_writeat(goto_location, end_location, 4) ;
+ } )
+;
+
+while_statement:
+ %prelude {
+  TCLOOP * loop = lp_add () ;
+  dword if_location ;
+  loop->begin_pos = chunk_get() ;
+ }
+ 
+ WHILE '(' exp0 ')' 
+ {
+  if_location = chunk_write(TIF,0,4) ;
+ }
+ content
+ {
+  loop = lp_get(0) ; // everything has a reason, trust me
+  chunk_write(TGOTO,loop->begin_pos,4) ;
+  loop->end_pos = chunk_get () ;
+  chunk_writeat(if_location,loop->end_pos,4) ;
+  lp_end () ;
+ }
+;
+
+infinity_statement:
+ %prelude {
+  TCLOOP * loop = lp_add () ;
+  loop->begin_pos = chunk_get() ;
+ }
+ INFINITY
+ content
+ {
+  loop = lp_get(0) ;
+  chunk_write(TGOTO,loop->begin_pos,4) ;
+  loop->end_pos = chunk_get() ;
+  lp_end () ;
+ }
+;
+
+return_statement:
+ RETURN exp0 { chunk_write (TRETURN, 0, 0) ; }
+ | RETURN { chunk_write (TPUSH1, 0, 1) ; chunk_write (TRETURN, 0, 0) ; }
+;
+
+exp0:
+ exp1 '=' exp0 { chunk_write (TSET, 0, 0) ; }
+ | exp1 '+' '=' exp0 { chunk_write (TSETADD, 0, 0) ; }
+ | exp1 '-' '=' exp0 { chunk_write (TSETSUB, 0, 0) ; }
+ | exp1 '*' '=' exp0 { chunk_write (TSETMUL, 0, 0) ; } 
+ | exp1 '/' '=' exp0 { chunk_write (TSETDIV, 0, 0) ; }
+ | exp1 '%' '=' exp0 { chunk_write (TSETMOD, 0, 0) ; }
+ | exp1 '&' '=' exp0 { chunk_write (TSETAND, 0, 0) ; }
+ | exp1 '|' '=' exp0 { chunk_write (TSETOR, 0, 0) ; }
+ | exp1 '^' '=' exp0 { chunk_write (TSETXOR, 0, 0) ; }
+ | exp1 '<' '<' '=' exp0 { chunk_write (TSETSRIGHT, 0, 0) ; }
+ | exp1 '>' '>' '=' exp0 { chunk_write (TSETSLEFT, 0, 0) ; }
+ | exp1
+;
+
+exp1:
+ exp1 '?' exp2 ':' exp2 { yyerror("?: not supported yet") ; }
+ | exp2 
+;
+
+exp2:
+ exp2 '|' '|' exp3 { chunk_write (TLOR, 0, 0) ; }
+ | exp3
+;
+
+exp3:
+ exp3 '&' '&' exp4 { chunk_write (TLAND, 0, 0) ; }
+ | exp4
+;
+
+exp4:
+ exp4 '|' exp5 { chunk_write (TOR, 0, 0) ; }
+ | exp5
+;
+
+exp5:
+ exp5 '^' exp6 { chunk_write (TXOR, 0, 0) ; }
+ | exp6
+;
+
+exp6:
+ exp6 '&' exp7 { chunk_write (TAND, 0, 0) ; }
+ | exp7
+;
+
+exp7:
+ exp7 '=' '=' exp8 { chunk_write (TEQ, 0, 0) ; }
+ | exp7 '!' '=' exp8 { chunk_write (TNQ, 0, 0) ; }
+ | exp8
+;
+
+exp8:
+ exp8 '<' exp9 { chunk_write (TGT, 0, 0) ; }
+ | exp8 '>' exp9 { chunk_write (TLT, 0, 0) ; }
+ | exp8 '<' '=' exp9 { chunk_write (TGTEQ, 0, 0) ; }
+ | exp8 '>' '=' exp9 { chunk_write (TLTEQ, 0, 0) ; }
+ | exp9
+;
+
+exp9:
+ exp9 '<' '<' exp10 { chunk_write (TSLEFT, 0, 0) ; }
+ | exp9 '>' '>' exp10 { chunk_write (TSRIGHT, 0, 0) ; }
+ | exp10
+;
+
+exp10:
+ exp10 '+' exp11 { chunk_write (TADD, 0, 0) ; }
+ | exp10 '-' exp11 { chunk_write (TSUB, 0, 0) ; }
+ | exp10 '.' exp11 { chunk_write (TCAT,0,0) ; }
+ | exp11
+;
+
+exp11:
+ exp11 '*' exp12 { chunk_write (TMUL, 0, 0) ; }
+ | exp11 '/' exp12 { chunk_write (TDIV, 0, 0) ; }
+ | exp11 '%' exp12 { chunk_write (TMOD, 0, 0) ; }
+ | exp12
+;
+
+exp12:
+ exp12 '*' '*' exp13 { chunk_write (TPOW,0,0) ; }
+ | exp13
+;
+
+exp13:
+ CAST_STRING '<' exp13 '>' { chunk_write (TCASTSTRING, 0, 0) ; }
+ | CAST_NUMBER '<' exp13 '>'{ chunk_write (TCASTNUMBER, 0, 0) ; }
+ | CAST_REAL '<' exp13 '>' { chunk_write (TCASTREAL, 0, 0) ; }
+ | NEW ID<id> { chunk_write(TPUSHSTR, id.index, 2) ; chunk_write (TNEW, 0, 0) ; }
+ | NEW '(' exp13 ')' { chunk_write (TNEW, 0, 0) ; }
+ | '+' exp13 // ignore, this is default behavior
+ | '-' exp13 { chunk_write (TNEG, 0, 0) ; }
+ | '!' exp13 { chunk_write (TNOT, 0, 0) ; }
+ | '~' exp13 { chunk_write (TINV, 0, 0) ; }
+ | '+' '+' exp13 { chunk_write (TINC, 0, 0) ; }
+ | '-' '-' exp13 { chunk_write (TDEC, 0, 0) ; }
+ | exp13 '+' '+' { chunk_write (TPINC, 0, 0) ; }
+ | exp13 '-' '-' { chunk_write (TPDEC, 0, 0) ; }
+ | exp14
+;
+
+exp14:
+ function_call
+ | member_call
+ | exp14 '[' exp0 ']' { chunk_write (TARRAY, 0, 0) ; }
+ | '(' exp0 ')'
+ | literals
+;
+
+function_call:
+ %prelude {
+  arg_count = 0;
+  }
+  
+ function_call_syntax<arg_count> { chunk_write (TCALL, arg_count, 1) ; }
+;
+
+function_call_syntax<byte arg_count>: 
+ ID<id> '(' function_call_args<arg_count> ')' { chunk_write (TPUSHSTR, id.index, 2) ; }
+ | FUNCTION '<' exp0 '>' '(' function_call_args<arg_count> ')'
+;
+
+function_call_args<byte arg_count>:
+ | function_call_arg<arg_count> ( ',' function_call_arg<arg_count> )*
+;
+
+function_call_arg<byte arg_count>:
+ exp0 { *arg_count += 1; }
+;
+
+member_call:
+ exp14 '-' '>' member_suffix 
+;
+
+member_suffix:
+%prelude {
+  arg_count = 0;
+ }
+ 
+ ( ID<id> { chunk_write(TPUSHSTR,id.index,2) ; } | MEMBER '(' exp0 ')' ) { chunk_write(TMEMBER,0,0) ; }
+ | function_call_syntax<arg_count> { chunk_write(TCCALL,arg_count,1) ; }
+;
+
+literals:
+ NUMBER<n> {
+  if ((dword)n.number <= 0xff)
+   chunk_write(TPUSH1,n.number,1) ;
+  else if ((dword)n.number <= 0xffff)
+   chunk_write(TPUSH2,n.number,2) ;
+  else if ((dword)n.number <= 0xffffffff)
+   chunk_write(TPUSH4,n.number,4) ;
+  else
+   yyerror("tetra does not support 64 bit+ integers yet") ;
+ }
+ | STRING<s> {
+   chunk_write(TPUSHSTR,s.index, 2) ;
+ }
+ | REAL<r> {
+   chunk_write_ptr(TPUSHREAL,&r.real, 8) ;
+ }
+ | ID<id>   {
+   chunk_write(TPUSHSTR,id.index,2) ;
+   chunk_write(TPUSHVAR,0,0) ;
+ }
+ | '$' ID<id>   {
+   chunk_write(TPUSHSTR,id.index,2) ;
+   chunk_write(TPUSHGLOBALVAR,0,0) ;
+ }
+;
